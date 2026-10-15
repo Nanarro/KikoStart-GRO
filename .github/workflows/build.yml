@@ -55,3 +55,29 @@ jobs:
             build/KikoStartGRO_artefacts/AU
             build/KikoStartGRO_artefacts/Standalone
           if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Zip each platform
+        run: |
+          cd artifacts
+          for d in */; do
+            zip -qr "${d%/}-${{ github.ref_name }}.zip" "$d"
+          done
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.zip
+          generate_release_notes: true
