@@ -63,7 +63,7 @@ KikoStartAudioProcessor::KikoStartAudioProcessor()
     : AudioProcessor (BusesProperties()
                           .withInput  ("Input",     juce::AudioChannelSet::stereo(), true)
                           .withOutput ("Output",    juce::AudioChannelSet::stereo(), true)
-                          .withInput  ("Sidechain", juce::AudioChannelSet::stereo(), false)),
+                          .withInput  ("Sidechain", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "STATE", createLayout())
 {
     mixP    = apvts.getRawParameterValue ("mix");
@@ -79,6 +79,8 @@ KikoStartAudioProcessor::KikoStartAudioProcessor()
 
     for (auto& a : waveMin) a.store (0.0f);
     for (auto& a : waveMax) a.store (0.0f);
+    for (auto& a : scMin)   a.store (0.0f);
+    for (auto& a : scMax)   a.store (0.0f);
 
     kg::lut (0);   // build the curve tables now, not on the audio thread
 }
@@ -108,12 +110,14 @@ void KikoStartAudioProcessor::prepareToPlay (double sr, int samplesPerBlock)
 
     constexpr double twoPi = 6.283185307179586;
     lpA     = (float) (1.0 - std::exp (-twoPi * 200.0 / sr));   // kick-detector low-pass ~200 Hz
-    envRel  = (float) std::exp (-1.0 / (0.030 * sr));           // 30 ms release
+    fastRel = (float) std::exp (-1.0 / (0.020 * sr));           // fast envelope: instant attack, 20 ms release
+    slowAtk = (float) (1.0 - std::exp (-1.0 / (0.015 * sr)));   // slow envelope: 15 ms attack
+    slowRel = (float) std::exp (-1.0 / (0.050 * sr));           //                50 ms release
     gainCoef = (float) (1.0 - std::exp (-1.0 / (0.0004 * sr))); // 0.4 ms anti-click smoothing
 
     curGain = 1.0f;
-    lp1 = lp2 = env = 0.0f;
-    armed = true;
+    lp1 = lp2 = fastEnv = slowEnv = 0.0f;
+    scActive = false;
     samplesSinceTrig = 1.0e12;
     freePpq = 0.0;
     curBin = -1;
@@ -178,12 +182,29 @@ void KikoStartAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     const double beats = beatsForRate[rateIdx];
     const double ppqPerSample = bpm / (60.0 * sampleRate);
     const double samplesPerCycle = beats / ppqPerSample;
-    const int minGap = (int) (0.040 * sampleRate);
+    const int minGap = (int) (0.025 * sampleRate);
 
     // ---- pointers ---------------------------------------------------------
     float* data[2] = { mainBus.getWritePointer (0), numCh > 1 ? mainBus.getWritePointer (1) : nullptr };
     const float* scData[2] = { scCh > 0 ? scBus.getReadPointer (0) : nullptr,
                                scCh > 1 ? scBus.getReadPointer (1) : nullptr };
+
+    // The host may enable the sidechain bus but leave it unrouted (silence). Only trust it once
+    // real signal has been seen; until then the trigger falls back to the main input.
+    if (scCh > 0 && ! scActive)
+    {
+        for (int c = 0; c < scCh && ! scActive; ++c)
+            for (int i = 0; i < numSamples; ++i)
+                if (std::abs (scData[c][i]) > 1.0e-4f) { scActive = true; break; }
+    }
+
+    auto storeBin = [this]
+    {
+        waveMin[(size_t) curBin].store (curMin,   std::memory_order_relaxed);
+        waveMax[(size_t) curBin].store (curMax,   std::memory_order_relaxed);
+        scMin  [(size_t) curBin].store (curScMin, std::memory_order_relaxed);
+        scMax  [(size_t) curBin].store (curScMax, std::memory_order_relaxed);
+    };
 
     auto midiIt = midi.begin();
     float lastT = -1.0f;
@@ -204,32 +225,40 @@ void KikoStartAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
             ++midiIt;
         }
 
-        // -- audio trigger (sidechain input, or the main input if no sidechain is connected)
+        // -- sidechain mono sample (also used for the waveform display)
+        float scMono = 0.0f;
+        if (scCh > 0)
+        {
+            for (int c = 0; c < scCh; ++c)
+                scMono += scData[c][i];
+            scMono /= (float) scCh;
+        }
+
+        // -- audio trigger: onset detection.
+        //    A kick is detected when the fast envelope jumps well above the slow one, so it keeps
+        //    working with rapid kick rolls, long tails or a sustained bass underneath.
         if (mode == 2)
         {
-            float s = mono;
-            if (scCh > 0)
-            {
-                s = 0.0f;
-                for (int c = 0; c < scCh; ++c)
-                    s += scData[c][i];
-                s /= (float) scCh;
-            }
+            const float s = (scCh > 0 && scActive) ? scMono : mono;   // no real sidechain -> main input
 
             lp1 += lpA * (s - lp1);
             lp2 += lpA * (lp1 - lp2);
             const float a = std::abs (lp2);
-            env = a > env ? a : env * envRel;
 
-            if (armed && env > thrLin && samplesSinceTrig > (double) minGap)
+            fastEnv = a > fastEnv ? a : fastEnv * fastRel;
+
+            if (fastEnv > slowEnv)
             {
+                slowEnv += slowAtk * (fastEnv - slowEnv);
+            }
+            else
+            {
+                const float d = slowEnv * slowRel;
+                slowEnv = d > fastEnv ? d : fastEnv;
+            }
+
+            if (fastEnv > thrLin && fastEnv > 1.7f * slowEnv && samplesSinceTrig > (double) minGap)
                 samplesSinceTrig = 0.0;
-                armed = false;
-            }
-            else if (! armed && env < thrLin * 0.5f)
-            {
-                armed = true;
-            }
         }
 
         // -- position inside the cycle -> target gain
@@ -265,23 +294,22 @@ void KikoStartAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
             if (bin != curBin)
             {
                 if (curBin >= 0)
-                {
-                    waveMin[(size_t) curBin].store (curMin, std::memory_order_relaxed);
-                    waveMax[(size_t) curBin].store (curMax, std::memory_order_relaxed);
-                }
+                    storeBin();
                 curBin = bin;
                 curMin = curMax = mono;
+                curScMin = curScMax = scMono;
             }
             else
             {
-                curMin = juce::jmin (curMin, mono);
-                curMax = juce::jmax (curMax, mono);
+                curMin   = juce::jmin (curMin,   mono);
+                curMax   = juce::jmax (curMax,   mono);
+                curScMin = juce::jmin (curScMin, scMono);
+                curScMax = juce::jmax (curScMax, scMono);
             }
         }
         else if (curBin >= 0)
         {
-            waveMin[(size_t) curBin].store (curMin, std::memory_order_relaxed);
-            waveMax[(size_t) curBin].store (curMax, std::memory_order_relaxed);
+            storeBin();
             curBin = -1;
         }
         lastT = t;

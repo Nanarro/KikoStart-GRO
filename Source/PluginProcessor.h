@@ -7,7 +7,7 @@
 class KikoStartAudioProcessor : public juce::AudioProcessor
 {
 public:
-    static constexpr int numWaveBins = 600;
+    static constexpr int numWaveBins = 1024;
 
     KikoStartAudioProcessor();
     ~KikoStartAudioProcessor() override = default;
@@ -40,7 +40,8 @@ public:
     juce::AudioProcessorValueTreeState apvts;
 
     // Shared with the editor (lock-free)
-    std::array<std::atomic<float>, numWaveBins> waveMin, waveMax;
+    std::array<std::atomic<float>, numWaveBins> waveMin, waveMax;   // entrada principal
+    std::array<std::atomic<float>, numWaveBins> scMin, scMax;       // entrada sidechain
     std::atomic<float> playPhase { -1.0f };   // 0..1 inside the cycle, <0 = idle
 
 private:
@@ -62,17 +63,18 @@ private:
     double freePpq = 0.0;
     double samplesSinceTrig = 1.0e12;
 
-    // audio-trigger detector
-    float lp1 = 0.0f, lp2 = 0.0f, env = 0.0f;
-    float lpA = 0.0f, envRel = 0.0f;
-    bool armed = true;
+    // audio-trigger detector (onset detection: fast envelope vs slow envelope)
+    float lp1 = 0.0f, lp2 = 0.0f;
+    float fastEnv = 0.0f, slowEnv = 0.0f;
+    float lpA = 0.0f, fastRel = 0.0f, slowAtk = 0.0f, slowRel = 0.0f;
+    bool scActive = false;   // true once the host has really sent signal on the sidechain
 
     // gain smoothing
     float curGain = 1.0f, gainCoef = 0.01f;
 
     // waveform capture
     int curBin = -1;
-    float curMin = 0.0f, curMax = 0.0f;
+    float curMin = 0.0f, curMax = 0.0f, curScMin = 0.0f, curScMax = 0.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (KikoStartAudioProcessor)
 };

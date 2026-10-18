@@ -149,24 +149,36 @@ void CurveDisplay::paint (Graphics& g)
     for (int i = 1; i < 4; ++i)
         g.fillRect (w * (float) i / 4.0f, 0.0f, 1.0f, h);
 
-    // input waveform
+    // waveforms: main input (grey) and sidechain input (yellow, drawn on top)
     constexpr int N = KikoStartAudioProcessor::numWaveBins;
-    g.setColour (Colour (0xffb8b8b8).withAlpha (0.75f));
-    for (int px = 0; px < (int) w; ++px)
+
+    auto drawWave = [&] (const std::array<std::atomic<float>, N>& mins,
+                         const std::array<std::atomic<float>, N>& maxs,
+                         Colour colour, float minRange)
     {
-        const int b0 = jlimit (0, N - 1, (int) ((float) px / w * (float) N));
-        const int b1 = jlimit (b0, N - 1, (int) ((float) (px + 1) / w * (float) N));
-        float lo = 0.0f, hi = 0.0f;
-        for (int k = b0; k <= b1; ++k)
+        g.setColour (colour);
+        for (int px = 0; px < (int) w; ++px)
         {
-            lo = jmin (lo, proc.waveMin[(size_t) k].load (std::memory_order_relaxed));
-            hi = jmax (hi, proc.waveMax[(size_t) k].load (std::memory_order_relaxed));
+            const int b0 = jlimit (0, N - 1, (int) ((float) px / w * (float) N));
+            const int b1 = jlimit (b0, N - 1, (int) ((float) (px + 1) / w * (float) N));
+            float lo = 0.0f, hi = 0.0f;
+            for (int k = b0; k <= b1; ++k)
+            {
+                lo = jmin (lo, mins[(size_t) k].load (std::memory_order_relaxed));
+                hi = jmax (hi, maxs[(size_t) k].load (std::memory_order_relaxed));
+            }
+            if (hi - lo < minRange)
+                continue;
+
+            const float yTop = h * 0.5f - jlimit (-1.0f, 1.0f, hi) * h * 0.45f;
+            float yBot = h * 0.5f - jlimit (-1.0f, 1.0f, lo) * h * 0.45f;
+            if (yBot - yTop < 1.0f) yBot = yTop + 1.0f;
+            g.fillRect ((float) px, yTop, 1.0f, yBot - yTop);
         }
-        const float yTop = h * 0.5f - jlimit (-1.0f, 1.0f, hi) * h * 0.45f;
-        float yBot = h * 0.5f - jlimit (-1.0f, 1.0f, lo) * h * 0.45f;
-        if (yBot - yTop < 1.0f) yBot = yTop + 1.0f;
-        g.fillRect ((float) px, yTop, 1.0f, yBot - yTop);
-    }
+    };
+
+    drawWave (proc.waveMin, proc.waveMax, Colour (0xffb8b8b8).withAlpha (0.75f), 0.0f);
+    drawWave (proc.scMin,   proc.scMax,   yellow.withAlpha (0.65f), 0.004f);
 
     // area after the end of the curve
     const float hx = handleX();

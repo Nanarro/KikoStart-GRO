@@ -13,7 +13,8 @@ Plugin de **sidechain / ducking multibanda** (VST3 para Windows, macOS y Linux; 
 | **Rate** | 1/8, 1/4, 1/2, 1/1 (longitud del ciclo en pulsos). |
 | **Mix** | Dry/Wet con el knob central. |
 
-> Si no hay sidechain conectado, el modo AUDIO analiza la propia entrada (útil para probar el Standalone).
+> **Sidechain:** el bus está activado por defecto (en Ableton Live elige el origen en la sección *Sidechain* del plugin). Si el host no envía señal real por el sidechain, el modo AUDIO analiza la propia entrada (útil para probar el Standalone).
+> El disparo por audio usa un detector de ataques (envolvente rápida vs. lenta), pensado para kicks seguidos, colas largas o bajos sostenidos. En el visualizador, la entrada principal se ve en gris y la del sidechain en amarillo.
 > MIDI → plugin: Ableton Live no enruta MIDI a efectos de audio; usa Reaper, FL Studio, Bitwig, Cubase, Logic (AU), etc.
 
 ## Compilar
